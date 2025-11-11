@@ -281,11 +281,83 @@ with active_tab[-1]:
                                mime="text/csv")
 
     # ---------- AI TRAINING SIMULATION ----------
+    # ---------- AI TRAINING SIMULATION + 3D DIGITAL TWIN BRAIN ----------
     st.markdown("### 🧠 AI Model Training Simulation")
-    st.caption("Visual simulation of the Digital Twin model learning from generated data.")
+    st.caption("Watch the Digital Twin 'learn' from synthetic data in real time.")
 
     if st.button("🚀 Simulate Training"):
-        st.info("Initializing AI training engine (simulation mode)...")
+        st.info("Initializing AI twin neural activity (simulation mode)...")
+
+        epochs = 20
+        accuracies, progress = [], st.progress(0)
+        chart_area = st.empty()
+        brain_area = st.empty()
+
+        # --- setup the 3D brain base ---
+        n_neurons = 80
+        np.random.seed(42)
+        xs = np.random.uniform(-1, 1, n_neurons)
+        ys = np.random.uniform(-1, 1, n_neurons)
+        zs = np.random.uniform(-1, 1, n_neurons)
+        base_colors = np.full(n_neurons, 0.2)
+
+        for epoch in range(1, epochs + 1):
+            acc = 60 + 40 * (1 - np.exp(-epoch / 6)) + np.random.normal(0, 1.5)
+            accuracies.append(acc)
+            progress.progress(epoch / epochs)
+
+            # ---- Update 3D brain pulse ----
+            pulse = 0.2 + 0.8 * np.sin(epoch / 3 + np.linspace(0, 2*np.pi, n_neurons))
+            colors = np.clip(base_colors + pulse / 2, 0, 1)
+            brain_fig = go.Figure(data=[
+                go.Scatter3d(
+                    x=xs, y=ys, z=zs,
+                    mode='markers',
+                    marker=dict(size=5,
+                                color=colors,
+                                colorscale='Viridis',
+                                opacity=0.8)
+                )
+            ])
+            brain_fig.update_layout(
+                title=f"Digital Twin Neural Activity — Epoch {epoch}",
+                margin=dict(l=0, r=0, t=40, b=0),
+                height=350,
+                scene=dict(xaxis=dict(visible=False),
+                           yaxis=dict(visible=False),
+                           zaxis=dict(visible=False))
+            )
+            brain_area.plotly_chart(brain_fig, use_container_width=True)
+
+            # ---- Training accuracy chart ----
+            chart_fig = go.Figure()
+            chart_fig.add_trace(go.Scatter(
+                x=list(range(1, len(accuracies) + 1)),
+                y=accuracies,
+                mode="lines+markers",
+                line=dict(color="#00C851", width=3),
+                name="Training Accuracy (%)"
+            ))
+            chart_fig.update_layout(
+                height=300,
+                title=f"Epoch {epoch}/{epochs} — Accuracy {acc:.2f}%",
+                xaxis_title="Epoch",
+                yaxis_title="Accuracy (%)",
+                yaxis=dict(range=[50, 100])
+            )
+            chart_area.plotly_chart(chart_fig, use_container_width=True)
+            st.sleep(0.25)
+
+        st.success("🎉 Digital-Twin Brain training simulation complete!")
+        st.metric("Final Accuracy", f"{accuracies[-1]:.2f} %")
+        st.metric("Training Duration", "≈ 5 seconds (simulated)")
+        st.markdown("""
+        ✅ **Training Summary**
+        - Neural pathways strengthened across 3D twin model  
+        - Recovery predictions improved after simulated learning  
+        - Demonstrates adaptive AI capability for personalized healthcare
+        """)
+
 
         # Fake epoch training
         epochs = 20
