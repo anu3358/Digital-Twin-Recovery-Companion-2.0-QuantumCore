@@ -1,4 +1,4 @@
-# app.py - Digital-Twin Recovery Companion - FULL
+# app.py - Digital-Twin Recovery Companion - PATCHED & ENHANCED
 import os
 import io
 import time
@@ -45,7 +45,11 @@ except Exception:
         return pwd_context.hash(pw)
 
 # Ensure DB tables exist (imports models to register mappings)
-Base.metadata.create_all(bind=engine)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    # swallow for deploy environments where DB isn't ready; logs will show details
+    print("Warning: Base.metadata.create_all failed:", e)
 
 # -----------------------
 # Streamlit page settings
@@ -63,19 +67,38 @@ _dark_css = r"""
   color: #e6eef8;
   min-height: 100vh;
 }
-/* Make cards slightly translucent */
+/* Sidebar background */
 section[data-testid="stSidebar"] { background: linear-gradient(180deg,#071421,#041022) !important; color: #d7eefb; }
-.css-1v3fvcr, .css-1d391kg { background: rgba(10,16,24,0.45) !important; border-radius: 8px; }
-/* Inputs */
+/* Card backgrounds and inputs */
+.css-1v3fvcr, .css-1d391kg, .stApp, .stMarkdown { background: rgba(10,16,24,0.45) !important; border-radius: 8px; }
 .stButton>button, .stDownloadButton>button { border-radius: 10px; }
 .stTextInput>div>div>input, textarea { background: rgba(255,255,255,0.02) !important; color: #e6eef8 !important; border-radius: 6px; }
-/* Sidebar headings */
+/* Headings */
 [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #cbe8ff !important; }
-/* Small tweaks */
 .streamlit-expanderHeader { color: #c8e7ff !important; }
+/* Make small plot icons visible on dark bg */
+.plotly-graph-div .modebar { background: rgba(0,0,0,0.35) !important; }
 </style>
 """
 st.markdown(_dark_css, unsafe_allow_html=True)
+
+# -----------------------
+# Safe rerun helper
+# -----------------------
+def safe_rerun():
+    """
+    Try to call Streamlit's experimental rerun. If unavailable or it errors,
+    set a small session-state flip and stop the current run so the page reloads
+    naturally on the next request.
+    """
+    try:
+        st.experimental_rerun()
+    except Exception:
+        st.session_state["_safe_rerun_ts"] = time.time()
+        try:
+            st.stop()
+        except Exception:
+            return
 
 # -----------------------
 # Helper utilities
@@ -179,18 +202,27 @@ if "last_uploaded_df" not in st.session_state:
     st.session_state["last_uploaded_df"] = None
 if "latest_feats" not in st.session_state:
     st.session_state["latest_feats"] = None
+if "_judge_enabled" not in st.session_state:
+    st.session_state["_judge_enabled"] = False
 
 # -----------------------
-# Sidebar: login & judge mode
+# Sidebar: login & judge mode (with explicit enable)
 # -----------------------
 with st.sidebar:
     st.title("Digital-Twin")
-    judge = st.checkbox("🎯 Judge Mode (auto-demo)", value=True, help="Auto-login and preload demo/sample data for instant walkthrough.")
+    judge_opt = st.checkbox("🎯 Judge Mode (auto-demo)", value=True, help="Auto-login and preload demo/sample data for instant walkthrough.")
     st.caption("Auto-login and preload demo/generated data for instant walkthrough.")
 
-    if judge and not st.session_state.user:
-        # ensure demo users exist then auto-login patient
-        seed_demo_if_missing()
+    # require explicit permission button to enable judge mode (safer for demos)
+    if judge_opt and not st.session_state["_judge_enabled"]:
+        st.warning("Judge Mode will auto-login a demo user and auto-load sample data. Click to enable.")
+        if st.button("Enable Judge Mode (confirm)"):
+            st.session_state["_judge_enabled"] = True
+            seed_demo_if_missing()
+            safe_rerun()
+
+    if st.session_state["_judge_enabled"] and not st.session_state.user:
+        # auto-login demo patient
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.email == "patient@example.com").first()
@@ -206,7 +238,7 @@ with st.sidebar:
         if st.button("Logout", use_container_width=True):
             st.session_state.user = None
             st.session_state.role = None
-            st.experimental_rerun()
+            safe_rerun()
     else:
         st.subheader("Login")
         email = st.text_input("Email", value="patient@example.com")
@@ -223,7 +255,7 @@ with st.sidebar:
                         log_action(db, user.id, "login", {"role": user.role})
                     except Exception:
                         pass
-                    st.experimental_rerun()
+                    safe_rerun()
                 else:
                     st.error("Invalid credentials or role mismatch")
             finally:
@@ -279,13 +311,21 @@ with active[0]:
         st.markdown("#### Digital Twin (Animated)")
         # Gait stick figure + 3D brain in two columns
         gait_col, brain_col = st.columns([2,1])
-        # Build gait frames
+        # build interactive controls retained from previous version
+        with st.expander("Digital Twin Controls", expanded=False):
+            dt_mode = st.selectbox("Mode", ["Walk","Balance","Step-Up"], key="dt_mode")
+            dt_speed = st.selectbox("Speed", ["Slow","Normal","Fast"], key="dt_speed")
+            dt_muscle = st.selectbox("Muscle Highlight", ["None","EMG","Fatigue","Pain"], key="dt_muscle")
+            st.markdown("Use Play to animate gait; use Simulate Training to smooth motion (demo).")
+
+        # Build gait frames (same as before but speed-scaled)
         t = np.linspace(0, 2*np.pi, 30)
         base = np.array([[0,1.8,0],[0,1.4,0],[-0.3,1.1,0],[0,1.4,0],[0.3,1.1,0],
                          [0,1.4,0],[0,0.8,0],[-0.2,0.2,0],[0,0.8,0],[0.2,0.2,0]])
         frames = []
+        speed_factor = 1.0 if dt_speed=="Normal" else (0.6 if dt_speed=="Slow" else 1.6)
         for i in range(len(t)):
-            phase = 0.12 * np.sin(t[i])
+            phase = 0.12 * np.sin(t[i] * speed_factor)
             xs = base[:,0] + np.array([0,0,phase,0,-phase,0,0,phase,0,-phase])
             ys = base[:,1]
             frames.append(go.Frame(data=[go.Scatter3d(x=xs, y=ys, z=[0]*len(xs), mode='lines+markers')]))
@@ -294,7 +334,7 @@ with active[0]:
         gait_fig.update_layout(scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
                                height=360, margin=dict(l=10,r=10,t=10,b=10))
         gait_fig.update_layout(updatemenus=[{"type":"buttons", "buttons":[
-            {"label":"Play", "method":"animate", "args":[None, {"frame": {"duration":60, "redraw": True}, "fromcurrent": True}]},
+            {"label":"Play gait", "method":"animate", "args":[None, {"frame": {"duration":60, "redraw": True}, "fromcurrent": True}]},
             {"label":"Pause", "method":"animate", "args":[ [None], {"mode":"immediate", "frame": {"duration": 0}} ]}
         ]}])
 
@@ -309,10 +349,11 @@ with active[0]:
 
         with gait_col:
             st.plotly_chart(gait_fig, use_container_width=True)
+            st.caption("Digital Twin Gait (stick-figure) — Play/Pause controls available.")
         with brain_col:
             brain_plotter = st.empty()
             brain_plotter.plotly_chart(brain_fig, use_container_width=True)
-            st.caption("Digital Twin Neural Activity (demo)")
+            st.caption("Digital Twin Neural Activity (demo) — Simulate Training to animate")
 
     with col_side:
         st.subheader("What-if Simulation")
@@ -324,6 +365,8 @@ with active[0]:
             db = SessionLocal()
             try:
                 log_action(db, st.session_state.user.id, "prediction", {"extra_minutes": extra, "conf": conf})
+            except Exception:
+                pass
             finally:
                 db.close()
             st.metric("Predicted gait speed Δ", f"{pred.get('gait_speed_change_pct',0)} %")
@@ -455,6 +498,8 @@ with active[1]:
                 db = SessionLocal()
                 try:
                     log_action(db, st.session_state.user.id, "prediction", {"extra_minutes": extra_minutes})
+                except Exception:
+                    pass
                 finally:
                     db.close()
                 st.metric("Predicted gait speed Δ", f"{res.get('gait_speed_change_pct',0)} %")
@@ -522,7 +567,7 @@ if tabs[-1] == "🧬 Data Generator":
 
         n_pat = st.slider("Patients", 1, 20, 5)
         hours = st.slider("Hours per patient", 1, 48, 2)
-        hz = st.slider("Sampling freq (Hz)", 1, 10, default_hz)
+        hz = st.slider("Sampling freq (Hz)", 1, 10, default_hz if default_hz else 1)
         mode = st.selectbox("Activity mode", ["mixed", "low", "medium", "high"])
 
         if st.button("⚙️ Generate Dataset (based on sample)"):
@@ -531,6 +576,9 @@ if tabs[-1] == "🧬 Data Generator":
                 for pid in range(1, n_pat+1):
                     lvl = np.random.choice(["low","medium","high"]) if mode == "mixed" else mode
                     total = max(1, hours * 3600 * hz)
+                    # limit to keep memory small on cloud; warn if huge
+                    if total * n_pat > 5_000_000:
+                        st.warning("Large generation requested — streamlit might run out of memory. Reduce hours or patients.")
                     ts = [datetime.now() - timedelta(seconds=j / hz) for j in range(total)]
                     ts.reverse()
                     stats = {}
@@ -563,8 +611,11 @@ if tabs[-1] == "🧬 Data Generator":
                 os.makedirs("data", exist_ok=True)
                 fname = f"data/generated_{n_pat}p_{hours}h_{hz}hz.csv"
                 df_gen.to_csv(fname, index=False)
-                # also store to AUTOGEN_PATH for quick reload in other tabs
-                df_gen.to_csv(AUTOGEN_PATH, index=False)
+                # also write to AUTOGEN_PATH for quick loads in other tabs
+                try:
+                    df_gen.to_csv(AUTOGEN_PATH, index=False)
+                except Exception:
+                    pass
                 st.success(f"Generated dataset: {fname}")
                 st.metric("Rows", len(df_gen))
                 st.download_button("Download CSV", data=df_gen.to_csv(index=False).encode("utf-8"), file_name="synthetic_dataset.csv", mime="text/csv")
