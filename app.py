@@ -1,4 +1,4 @@
-# app.py - Digital-Twin Recovery Companion (adapted to your dataset)
+# app.py - Digital-Twin Recovery Companion (adapted to your dataset) - corrected + 3D brain animation
 import os
 import io
 import numpy as np
@@ -11,6 +11,9 @@ from pathlib import Path
 # local imports (DB models/util)
 from database import SessionLocal, engine, Base
 from models import User, PatientProfile, SensorStream, Prediction, TwinModel
+from audit import log_action
+from report import generate_report
+from data_ingestion import parse_and_store  # optional; kept for compatibility
 
 # Safe import of util.auth (fallback included)
 try:
@@ -34,12 +37,10 @@ except Exception:
     def hash_password(pw: str) -> str:
         return pwd_context.hash(pw)
 
-from audit import log_action
-from report import generate_report
-from data_ingestion import parse_and_store  # optional; we use our own simple parser below
+# Ensure DB tables exist
+Base.metadata.create_all(bind=engine)
 
 st.set_page_config(page_title="Digital-Twin Recovery Companion", layout="wide")
-Base.metadata.create_all(bind=engine)
 
 # ---------- Seed (guarded) ----------
 def seed_demo():
@@ -71,54 +72,9 @@ if "user" not in st.session_state:
 if "role" not in st.session_state:
     st.session_state.role = None
 
-# ---------- Sidebar (login / judge) ----------
-with st.sidebar:
-    st.title("Digital-Twin")
-    judge = st.checkbox("🎯 Judge Mode (auto-demo)", value=True)
-    st.caption("Auto-login and preload demo/generated data for instant walkthrough.")
-    if judge and not st.session_state.user:
-        db = SessionLocal()
-        user = db.query(User).filter(User.email == "patient@example.com").first()
-        if user:
-            st.session_state.user = user
-            st.session_state.role = "patient"
-            st.success("Auto-logged in as patient@example.com")
-        db.close()
-
-    if st.session_state.user:
-        st.success(f"Logged in: {st.session_state.user.email} ({st.session_state.role})")
-        if st.button("Logout", use_container_width=True):
-            st.session_state.user = None
-            st.session_state.role = None
-            st.rerun()
-    else:
-        st.subheader("Login")
-        email = st.text_input("Email", value="patient@example.com")
-        password = st.text_input("Password", value="changeme", type="password")
-        role_pick = st.selectbox("Role", options=["patient","clinician","admin"])
-        if st.button("Sign in", use_container_width=True):
-            db = SessionLocal()
-            user = authenticate(db, email, password)
-            if user and (role_pick == user.role or role_pick == "admin"):
-                st.session_state.user = user
-                st.session_state.role = user.role
-                log_action(db, user.id, "login", {"role": user.role})
-                st.rerun()
-            else:
-                st.error("Invalid credentials or role mismatch")
-            db.close()
-
-st.title("Digital-Twin Recovery Companion")
-
-if not st.session_state.user:
-    st.info("Please log in from the sidebar to continue.")
-    st.stop()
-
-role = st.session_state.role
-
 # ---------- helper utilities ----------
 def infer_sampling_hz(df):
-    if "timestamp" not in df.columns:
+    if df is None or "timestamp" not in df.columns:
         return 1
     try:
         ts = pd.to_datetime(df["timestamp"])
@@ -129,10 +85,8 @@ def infer_sampling_hz(df):
         return 1
 
 def extract_features(df):
-    # expects accel_x, accel_y, accel_z, emg, spo2, hr, step_count
     feats = {}
     df2 = df.copy()
-    # ensure numeric
     for c in ["accel_x","accel_y","accel_z","emg","spo2","hr","step_count"]:
         if c in df2.columns:
             df2[c] = pd.to_numeric(df2[c], errors="coerce").fillna(0)
@@ -149,11 +103,8 @@ def extract_features(df):
         feats["hr_std"] = float(df2["hr"].std())
     if "spo2" in df2.columns:
         feats["spo2_mean"] = float(df2["spo2"].mean())
-    # cadence: steps per minute (estimate)
     if "step_count" in df2.columns:
-        # if step_count cumulative, compute diff rate
         steps_diff = df2["step_count"].diff().clip(lower=0).fillna(0)
-        # compute samples_per_min from timestamps if possible
         hz = infer_sampling_hz(df2)
         cadence = steps_diff.mean() * 60 * hz
         feats["cadence_est"] = float(cadence)
@@ -169,10 +120,59 @@ def load_csv_from_path(path: str):
     except Exception:
         return None
 
-# auto-load a generated dataset if present (from previous generation)
+# auto-load a generated dataset path (if present)
 AUTOGEN_PATH = Path("/mnt/data/generated_from_uploaded_5p_17h_1hz.csv")
 if AUTOGEN_PATH.exists():
     st.sidebar.success("Found generated dataset (auto-load available)")
+
+# ---------- Sidebar (login / judge) ----------
+with st.sidebar:
+    st.title("Digital-Twin")
+    judge = st.checkbox("🎯 Judge Mode (auto-demo)", value=True)
+    st.caption("Auto-login and preload demo/generated data for instant walkthrough.")
+    if judge and not st.session_state.user:
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.email == "patient@example.com").first()
+            if user:
+                st.session_state.user = user
+                st.session_state.role = "patient"
+                st.success("Auto-logged in as patient@example.com")
+        finally:
+            db.close()
+
+    if st.session_state.user:
+        st.success(f"Logged in: {st.session_state.user.email} ({st.session_state.role})")
+        if st.button("Logout", use_container_width=True):
+            st.session_state.user = None
+            st.session_state.role = None
+            st.rerun()
+    else:
+        st.subheader("Login")
+        email = st.text_input("Email", value="patient@example.com")
+        password = st.text_input("Password", value="changeme", type="password")
+        role_pick = st.selectbox("Role", options=["patient","clinician","admin"])
+        if st.button("Sign in", use_container_width=True):
+            db = SessionLocal()
+            try:
+                user = authenticate(db, email, password)
+                if user and (role_pick == user.role or role_pick == "admin"):
+                    st.session_state.user = user
+                    st.session_state.role = user.role
+                    log_action(db, user.id, "login", {"role": user.role})
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials or role mismatch")
+            finally:
+                db.close()
+
+st.title("Digital-Twin Recovery Companion")
+
+if not st.session_state.user:
+    st.info("Please log in from the sidebar to continue.")
+    st.stop()
+
+role = st.session_state.role
 
 # ---------- tabs ----------
 tabs = ["🏠 Overview", "📥 Data Ingestion"]
@@ -196,9 +196,8 @@ with active[0]:
         st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("#### Digital Twin — Animated Gait (demo)")
-        # simple animated stick figure with option to choose patient from dataset if available
+        # detect patients from last uploaded df or autogen
         available_patients = []
-        # try to populate from session if any df was uploaded/loaded earlier
         if "last_uploaded_df" in st.session_state and st.session_state["last_uploaded_df"] is not None:
             df_check = st.session_state["last_uploaded_df"]
             if "patient_id" in df_check.columns:
@@ -213,7 +212,7 @@ with active[0]:
         speed = st.selectbox("Speed", ["Slow","Normal","Fast"], key="dt_speed")
         muscle = st.selectbox("Muscle Highlight", ["None","EMG","Fatigue","Pain"], key="dt_muscle")
 
-        # stick-figure (same logic as before)
+        # stick-figure gait frames
         t = np.linspace(0, 2*np.pi, 30)
         base = np.array([[0,1.8,0],[0,1.4,0],[-0.3,1.1,0],[0,1.4,0],[0.3,1.1,0],
                          [0,1.4,0],[0,0.8,0],[-0.2,0.2,0],[0,0.8,0],[0.2,0.2,0]])
@@ -223,11 +222,32 @@ with active[0]:
             xs = base[:,0] + np.array([0,0,phase,0,-phase,0,0,phase,0,-phase])
             ys = base[:,1]
             frames.append(go.Frame(data=[go.Scatter3d(x=xs, y=ys, z=[0]*len(xs), mode='lines+markers')]))
-        twin_fig = go.Figure(data=[go.Scatter3d(x=base[:,0], y=base[:,1], z=[0]*10, mode='lines+markers')], frames=frames)
-        twin_fig.update_layout(scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
-                               height=360, margin=dict(l=10,r=10,t=10,b=10),
-                               updatemenus=[{"type":"buttons","buttons":[{"label":"Play","method":"animate","args":[None]}]}])
-        st.plotly_chart(twin_fig, use_container_width=True)
+
+        # 3D brain base (for demo pulsing)
+        n_neurons = 80
+        np.random.seed(42)
+        bx = np.random.uniform(-1,1,n_neurons)
+        by = np.random.uniform(-1,1,n_neurons)
+        bz = np.random.uniform(-1,1,n_neurons)
+
+        # create combined layout with two side-by-side charts (gait + brain)
+        left_fig = go.Figure(data=[go.Scatter3d(x=base[:,0], y=base[:,1], z=[0]*10, mode='lines+markers')],
+                             frames=frames)
+        left_fig.update_layout(scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
+                               height=360, margin=dict(l=10,r=10,t=10,b=10))
+        right_fig = go.Figure(data=[go.Scatter3d(x=bx, y=by, z=bz, mode='markers',
+                                                 marker=dict(size=5, color=[0.2]*n_neurons, colorscale='Viridis'))])
+        right_fig.update_layout(scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
+                               height=360, margin=dict(l=10,r=10,t=10,b=10))
+
+        # show them separately but visually aligned
+        col_gait, col_brain = st.columns([2,1])
+        with col_gait:
+            left_fig.update_layout(updatemenus=[{"type":"buttons","buttons":[{"label":"Play gait","method":"animate","args":[None]}]}])
+            st.plotly_chart(left_fig, use_container_width=True)
+        with col_brain:
+            st.plotly_chart(right_fig, use_container_width=True)
+            st.caption("Digital Twin Neural Activity (demo)")
 
     with col_right:
         st.subheader("What-if Simulation")
@@ -235,7 +255,11 @@ with active[0]:
         if st.button("Run Simulation", key="overview_sim"):
             model = TwinModel()
             pred = model.predict(patient_id=st.session_state.user.id, scenario={"extra_minutes_balance": extra})
-            log_action(SessionLocal(), st.session_state.user.id, "prediction", {"extra_minutes": extra})
+            db = SessionLocal()
+            try:
+                log_action(db, st.session_state.user.id, "prediction", {"extra_minutes": extra})
+            finally:
+                db.close()
             st.metric("Predicted gait speed Δ", f"{pred.get('gait_speed_change_pct',0)} %")
             st.metric("Adherence score", f"{pred.get('adherence_score',0)}")
 
@@ -263,13 +287,11 @@ with active[1]:
             st.error("Failed to load auto-generated dataset.")
 
     if df is not None:
-        # normalize column names (strip)
         df.columns = [c.strip() for c in df.columns]
-        st.session_state["last_uploaded_df"] = df  # keep for overview use
+        st.session_state["last_uploaded_df"] = df
         st.markdown("### Dataset preview")
         st.dataframe(df.head(200), use_container_width=True)
 
-        # patient selection if present
         patients = []
         if "patient_id" in df.columns:
             patients = sorted(pd.unique(df["patient_id"]).tolist())
@@ -278,13 +300,10 @@ with active[1]:
         else:
             pid_sel = "All"
 
-        # plotting (subsample timestamps if too many)
         plot_df = df if pid_sel == "All" else df[df["patient_id"].astype(str) == str(pid_sel)]
-        # limit to 2000 points for plotting speed
         if len(plot_df) > 2000:
             plot_df = plot_df.sample(n=2000, random_state=42).sort_index()
 
-        # Accel plot
         if {"accel_x","accel_y","accel_z"}.issubset(df.columns):
             st.markdown("**Accelerometer**")
             fig = go.Figure()
@@ -294,7 +313,6 @@ with active[1]:
             fig.update_layout(height=240, margin=dict(l=10,r=10,t=20,b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        # EMG
         if "emg" in df.columns:
             st.markdown("**EMG**")
             fig = go.Figure()
@@ -302,7 +320,6 @@ with active[1]:
             fig.update_layout(height=200, margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        # HR
         if "hr" in df.columns:
             st.markdown("**Heart Rate**")
             fig = go.Figure()
@@ -310,14 +327,12 @@ with active[1]:
             fig.update_layout(height=200, margin=dict(l=10,r=10,t=10,b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        # features (per selection)
         feat_df = df if pid_sel == "All" else df[df["patient_id"].astype(str) == str(pid_sel)]
         feats = extract_features(feat_df)
         st.markdown("#### Extracted features (for prediction)")
         st.json(feats)
         st.session_state["latest_feats"] = feats
 
-        # store small sample to DB (first N rows) for auditing
         if st.button("Store small sample to DB"):
             db = SessionLocal()
             try:
@@ -328,7 +343,6 @@ with active[1]:
                 sample = df.head(200)
                 for _, row in sample.iterrows():
                     payload = {}
-                    # store a compact payload
                     for col in ["accel_x","accel_y","accel_z","emg","spo2","hr","step_count"]:
                         if col in row.index:
                             payload[col] = float(row[col]) if not pd.isna(row[col]) else 0.0
@@ -342,7 +356,6 @@ with active[1]:
             finally:
                 db.close()
 
-        # Predict from features
         st.markdown("---")
         st.markdown("#### Predict from extracted features")
         extra_minutes = st.slider("Extra balance training (min/day)", 0, 60, 15, key="predict_extra")
@@ -353,7 +366,11 @@ with active[1]:
             else:
                 model = TwinModel()
                 res = model.predict(patient_id=st.session_state.user.id, scenario={"extra_minutes_balance": extra_minutes}, feats=feats)
-                log_action(SessionLocal(), st.session_state.user.id, "prediction", {"extra_minutes": extra_minutes})
+                db = SessionLocal()
+                try:
+                    log_action(db, st.session_state.user.id, "prediction", {"extra_minutes": extra_minutes})
+                finally:
+                    db.close()
                 st.metric("Predicted gait speed Δ", f"{res.get('gait_speed_change_pct',0)} %")
                 st.metric("Adherence score", f"{res.get('adherence_score',0)}")
 
@@ -364,13 +381,15 @@ if role in ["clinician","admin"]:
         with active[idx]:
             st.subheader("Clinician Dashboard")
             db = SessionLocal()
-            patients = db.query(PatientProfile).all()
-            rows = []
-            for p in patients:
-                u = db.query(User).filter(User.id == p.user_id).first()
-                rows.append({"id": p.id, "name": u.full_name or u.email})
-            st.table(rows)
-            db.close()
+            try:
+                patients = db.query(PatientProfile).all()
+                rows = []
+                for p in patients:
+                    u = db.query(User).filter(User.id == p.user_id).first()
+                    rows.append({"id": p.id, "name": u.full_name or u.email})
+                st.table(rows)
+            finally:
+                db.close()
 
 # ---------- Admin ----------
 if role == "admin":
@@ -404,7 +423,6 @@ if role == "admin":
 if tabs[-1] == "🧬 Data Generator":
     with active[-1]:
         st.subheader("🧬 Synthetic Dataset Generator (based on your sample)")
-        # prefill parameters based on uploaded sample if available
         sample_df = None
         if "last_uploaded_df" in st.session_state and st.session_state["last_uploaded_df"] is not None:
             sample_df = st.session_state["last_uploaded_df"]
@@ -425,13 +443,11 @@ if tabs[-1] == "🧬 Data Generator":
                     total = hours * 3600 * hz
                     ts = [datetime.now() - timedelta(seconds=j / hz) for j in range(total)]
                     ts.reverse()
-                    # use sample stats if available
                     stats = {}
                     if sample_df is not None:
                         for c in ["accel_x","accel_y","accel_z","emg","spo2","hr","step_count"]:
                             if c in sample_df.columns:
                                 stats[c] = {"mean": float(sample_df[c].mean()), "std": float(sample_df[c].std())}
-                    # generate signals tuned to stats
                     tvals = np.linspace(0, 10*np.pi, total)
                     accel_x = (stats.get("accel_x",{}).get("mean",0) +
                                stats.get("accel_x",{}).get("std",0)*np.sin(tvals + pid) +
