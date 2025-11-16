@@ -1,4 +1,4 @@
-# app.py - Digital-Twin Recovery Companion - PATCHED & ENHANCED
+# app.py - Digital-Twin Recovery Companion - PATCHED & ENHANCED (FINAL)
 import os
 import io
 import time
@@ -562,7 +562,17 @@ if role == "admin":
 if tabs[-1] == "🧬 Data Generator":
     with active[-1]:
         st.header("🧬 Synthetic Dataset Generator (based on sample)")
-        sample_df = st.session_state.get("last_uploaded_df") or (load_csv_from_path(str(AUTOGEN_PATH)) if AUTOGEN_PATH.exists() else None)
+
+        # ===== SAFE sample_df retrieval (DO NOT use `or` with DataFrames) =====
+        _last = st.session_state.get("last_uploaded_df")
+        if _last is not None:
+            sample_df = _last
+        elif AUTOGEN_PATH.exists():
+            sample_df = load_csv_from_path(str(AUTOGEN_PATH))
+        else:
+            sample_df = None
+        # =====================================================================
+
         default_hz = infer_sampling_hz(sample_df)
 
         n_pat = st.slider("Patients", 1, 20, 5)
@@ -582,7 +592,7 @@ if tabs[-1] == "🧬 Data Generator":
                     ts = [datetime.now() - timedelta(seconds=j / hz) for j in range(total)]
                     ts.reverse()
                     stats = {}
-                    if sample_df is not None:
+                    if sample_df is not None and isinstance(sample_df, pd.DataFrame) and not sample_df.empty:
                         for c in ["accel_x","accel_y","accel_z","emg","spo2","hr","step_count"]:
                             if c in sample_df.columns:
                                 stats[c] = {"mean": float(sample_df[c].mean()), "std": float(sample_df[c].std())}
