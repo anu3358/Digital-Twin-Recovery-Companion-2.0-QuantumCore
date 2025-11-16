@@ -1,4 +1,4 @@
-# app.py - Digital-Twin Recovery Companion - PATCHED & ENHANCED (FINAL)
+# app.py - Digital-Twin Recovery Companion - PATCHED & ENHANCED (FINAL) - SAFE SESSION HANDLING
 import os
 import io
 import time
@@ -100,6 +100,36 @@ def safe_rerun():
         except Exception:
             return
 
+# ---------- SAFE USER HELPERS ----------
+def login_store_primitives(user):
+    """Store only primitives in session state (never a SQLAlchemy ORM object)."""
+    st.session_state["user_id"] = int(user.id)
+    st.session_state["user_email"] = str(user.email)
+    st.session_state["role"] = str(user.role)
+    st.session_state["user_name"] = getattr(user, "full_name", None)
+
+def logout_clear():
+    """Clear login-related session keys."""
+    for k in ["user_id", "user_email", "role", "user_name"]:
+        if k in st.session_state:
+            del st.session_state[k]
+
+def get_current_user():
+    """Return a fresh SQLAlchemy User object for current session user_id (or None)."""
+    uid = st.session_state.get("user_id")
+    if not uid:
+        return None
+    db = SessionLocal()
+    try:
+        # use session.get if available (SQLAlchemy 1.4+)
+        try:
+            u = db.get(User, uid)
+        except Exception:
+            u = db.query(User).filter(User.id == uid).first()
+        return u
+    finally:
+        db.close()
+
 # -----------------------
 # Helper utilities
 # -----------------------
@@ -192,12 +222,16 @@ if os.getenv("SEED_ON_STARTUP", "0") == "1":
     seed_demo_if_missing()
 
 # -----------------------
-# Session state defaults
+# Session state defaults (use primitives, not ORM)
 # -----------------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = None
+if "user_email" not in st.session_state:
+    st.session_state["user_email"] = None
 if "role" not in st.session_state:
-    st.session_state.role = None
+    st.session_state["role"] = None
+if "user_name" not in st.session_state:
+    st.session_state["user_name"] = None
 if "last_uploaded_df" not in st.session_state:
     st.session_state["last_uploaded_df"] = None
 if "latest_feats" not in st.session_state:
@@ -221,23 +255,23 @@ with st.sidebar:
             seed_demo_if_missing()
             safe_rerun()
 
-    if st.session_state["_judge_enabled"] and not st.session_state.user:
-        # auto-login demo patient
+    if st.session_state["_judge_enabled"] and not st.session_state.get("user_id"):
+        # auto-login demo patient (store primitives, not ORM)
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.email == "patient@example.com").first()
             if user:
-                st.session_state.user = user
-                st.session_state.role = user.role
+                login_store_primitives(user)
                 st.success(f"Auto-logged in as {user.email}")
         finally:
             db.close()
 
-    if st.session_state.user:
-        st.markdown(f"**Logged in:** {st.session_state.user.email}  \n`({st.session_state.role})`")
+    if st.session_state.get("user_id"):
+        ue = st.session_state.get("user_email", "unknown")
+        ur = st.session_state.get("role", "unknown")
+        st.markdown(f"**Logged in:** {ue}  \n`({ur})`")
         if st.button("Logout", use_container_width=True):
-            st.session_state.user = None
-            st.session_state.role = None
+            logout_clear()
             safe_rerun()
     else:
         st.subheader("Login")
@@ -249,8 +283,8 @@ with st.sidebar:
             try:
                 user = authenticate(db, email, password)
                 if user and (role_pick == user.role or role_pick == "admin"):
-                    st.session_state.user = user
-                    st.session_state.role = user.role
+                    # store primitives
+                    login_store_primitives(user)
                     try:
                         log_action(db, user.id, "login", {"role": user.role})
                     except Exception:
@@ -265,11 +299,12 @@ with st.sidebar:
 st.title("Digital-Twin Recovery Companion")
 
 # If not logged in, stop (sidebar prompts)
-if not st.session_state.user:
+if not st.session_state.get("user_id"):
     st.info("Please log in from the sidebar to continue.")
     st.stop()
 
-role = st.session_state.role
+# use primitive role
+role = st.session_state.get("role")
 
 # -----------------------
 # Tabs
@@ -361,12 +396,14 @@ with active[0]:
         conf = st.select_slider("Confidence", options=["Low","Medium","High"], value="Medium")
         if st.button("Run Simulation"):
             model = TwinModel()
-            pred = model.predict(patient_id=st.session_state.user.id, scenario={"extra_minutes_balance": extra})
+            user_id = st.session_state.get("user_id")
+            pred = model.predict(patient_id=user_id, scenario={"extra_minutes_balance": extra})
             db = SessionLocal()
             try:
-                log_action(db, st.session_state.user.id, "prediction", {"extra_minutes": extra, "conf": conf})
-            except Exception:
-                pass
+                try:
+                    log_action(db, user_id, "prediction", {"extra_minutes": extra, "conf": conf})
+                except Exception:
+                    pass
             finally:
                 db.close()
             st.metric("Predicted gait speed Δ", f"{pred.get('gait_speed_change_pct',0)} %")
@@ -458,9 +495,10 @@ with active[1]:
         if st.button("Store small sample to DB"):
             db = SessionLocal()
             try:
-                patient_profile = db.query(PatientProfile).filter(PatientProfile.user_id == st.session_state.user.id).first()
+                user_id = st.session_state.get("user_id")
+                patient_profile = db.query(PatientProfile).filter(PatientProfile.user_id == user_id).first()
                 if not patient_profile:
-                    patient_profile = PatientProfile(user_id=st.session_state.user.id, demographics={}, medical_history="")
+                    patient_profile = PatientProfile(user_id=user_id, demographics={}, medical_history="")
                     db.add(patient_profile); db.commit(); db.refresh(patient_profile)
                 sample = df.head(200)
                 for _, row in sample.iterrows():
@@ -475,7 +513,7 @@ with active[1]:
                     db.add(s)
                 db.commit()
                 try:
-                    log_action(db, st.session_state.user.id, "csv_upload", {"rows": len(df)})
+                    log_action(db, user_id, "csv_upload", {"rows": len(df)})
                 except Exception:
                     pass
                 st.success("Stored sample rows to DB")
@@ -494,12 +532,14 @@ with active[1]:
                 st.warning("Please upload/select data first.")
             else:
                 model = TwinModel()
-                res = model.predict(patient_id=st.session_state.user.id, scenario={"extra_minutes_balance": extra_minutes}, feats=feats)
+                user_id = st.session_state.get("user_id")
+                res = model.predict(patient_id=user_id, scenario={"extra_minutes_balance": extra_minutes}, feats=feats)
                 db = SessionLocal()
                 try:
-                    log_action(db, st.session_state.user.id, "prediction", {"extra_minutes": extra_minutes})
-                except Exception:
-                    pass
+                    try:
+                        log_action(db, user_id, "prediction", {"extra_minutes": extra_minutes})
+                    except Exception:
+                        pass
                 finally:
                     db.close()
                 st.metric("Predicted gait speed Δ", f"{res.get('gait_speed_change_pct',0)} %")
