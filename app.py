@@ -1,5 +1,5 @@
-\
-import os, io
+import os
+import io
 import numpy as np
 import streamlit as st
 import pandas as pd
@@ -8,13 +8,34 @@ from datetime import datetime, timedelta
 
 from database import SessionLocal, engine, Base
 from models import User, PatientProfile, SensorStream, Prediction, TwinModel
-from util.auth import authenticate, pwd_context as _pwd_ctx if False else None
-from util.auth import verify_password
+
+# Safe import of authentication helpers
+try:
+    # util/auth.py should define: authenticate(db, email, password), verify_password(plain, hashed), pwd_context
+    from util.auth import authenticate, verify_password, pwd_context
+except Exception:
+    # Fallback basic implementation if util.auth is missing (uses pbkdf2_sha256)
+    from passlib.context import CryptContext
+
+    pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+    def verify_password(plain: str, hashed: str) -> bool:
+        try:
+            return pwd_context.verify(plain, hashed)
+        except Exception:
+            return False
+
+    def authenticate(db, email: str, password: str):
+        user = db.query(User).filter(User.email == email).first()
+        if user and verify_password(password, user.hashed_password):
+            return user
+        return None
+
 from audit import log_action
 from report import generate_report
 from data_ingestion import parse_and_store
 
-from passlib.context import CryptContext
+from passlib.context import CryptContext  # used in admin user creation / seed
 
 st.set_page_config(page_title="Digital-Twin Recovery Companion", layout="wide")
 
@@ -160,26 +181,26 @@ with active[1]:
     if uploaded:
         try:
             df = pd.read_csv(uploaded)
-            req = [\"timestamp\",\"accel_x\",\"accel_y\",\"accel_z\",\"emg\",\"spo2\",\"hr\",\"step_count\"]
+            req = ["timestamp","accel_x","accel_y","accel_z","emg","spo2","hr","step_count"]
             miss = [c for c in req if c not in df.columns]
             if miss:
-                st.error(f\"Missing columns: {miss}\")
+                st.error(f"Missing columns: {miss}")
             else:
-                st.success(\"CSV loaded\")
+                st.success("CSV loaded")
                 # show signal charts
-                st.markdown(\"**Accelerometer (x,y,z)**\")
+                st.markdown("**Accelerometer (x,y,z)**")
                 fig_acc = go.Figure()
                 fig_acc.add_trace(go.Scatter(x=df['timestamp'], y=df['accel_x'], name='acc_x'))
                 fig_acc.add_trace(go.Scatter(x=df['timestamp'], y=df['accel_y'], name='acc_y'))
                 fig_acc.add_trace(go.Scatter(x=df['timestamp'], y=df['accel_z'], name='acc_z'))
                 fig_acc.update_layout(height=250, margin=dict(l=10,r=10,t=20,b=10))
                 st.plotly_chart(fig_acc, use_container_width=True)
-                st.markdown(\"**EMG**\")
+                st.markdown("**EMG**")
                 fig_emg = go.Figure()
                 fig_emg.add_trace(go.Scatter(x=df['timestamp'], y=df['emg'], name='emg'))
                 fig_emg.update_layout(height=200, margin=dict(l=10,r=10,t=10,b=10))
                 st.plotly_chart(fig_emg, use_container_width=True)
-                st.markdown(\"**Heart Rate**\")
+                st.markdown("**Heart Rate**")
                 fig_hr = go.Figure()
                 fig_hr.add_trace(go.Scatter(x=df['timestamp'], y=df['hr'], name='hr', line=dict(color='red')))
                 fig_hr.update_layout(height=200, margin=dict(l=10,r=10,t=10,b=10))
@@ -231,8 +252,8 @@ with active[1]:
             model = TwinModel()
             res = model.predict(patient_id=st.session_state.user.id, scenario={'extra_minutes_balance':extra2}, feats=feats)
             log_action(SessionLocal(), st.session_state.user.id, 'prediction', {'extra_minutes':extra2})
-            st.metric('Predicted gait speed Δ', f\"{res['gait_speed_change_pct']} %\")
-            st.metric('Adherence score', f\"{res['adherence_score']}\")
+            st.metric('Predicted gait speed Δ', f"{res['gait_speed_change_pct']} %")
+            st.metric('Adherence score', f"{res['adherence_score']}")
 
 # Clinician (simple)
 if role in ['clinician','admin']:
@@ -275,7 +296,7 @@ if role == 'admin':
                             db.commit()
                         st.success('User created')
             st.markdown('---')
-            st.code(f\"DB = {os.getenv('DATABASE_URL','sqlite:///./data/app.db')}\")
+            st.code(f"DB = {os.getenv('DATABASE_URL','sqlite:///./data/app.db')}")
             db.close()
 
 # Data Generator + training sim with brain animation (last tab)
@@ -311,6 +332,7 @@ if tabs[-1] == '🧬 Data Generator':
                     parts.append(dfp)
                     progress.progress(i/n_pat)
                 df_all = pd.concat(parts, ignore_index=True)
+                os.makedirs("data", exist_ok=True)
                 fname = f'data/generated_{n_pat}p_{hours}h_{hz}hz.csv'
                 df_all.to_csv(fname, index=False)
                 st.success('Dataset generated: '+fname)
