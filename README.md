@@ -1,5 +1,4 @@
 # Digital Twin Recovery Companion — Final Package
-https://digital-twin-recovery-companion-20-quantumcore-xxge2vab9ezvdbk.streamlit
 This is a Streamlit-ready demo app for the Digital-Twin Recovery Companion.
 It includes:
 - Role-based dashboards (Patient / Clinician / Admin)
